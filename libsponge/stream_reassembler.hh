@@ -1,51 +1,115 @@
-#ifndef SPONGE_LIBSPONGE_STREAM_REASSEMBLER_HH
-#define SPONGE_LIBSPONGE_STREAM_REASSEMBLER_HH
+#include "stream_reassembler.hh"
 
-#include "byte_stream.hh"
+#include <iostream>
+// Dummy implementation of a stream reassembler.
 
-#include <cstdint>
-#include <string>
+// For Lab 1, please replace with a real implementation that passes the
+// automated checks run by `make check_lab1`.
 
-//! \brief A class that assembles a series of excerpts from a byte stream (possibly out of order,
-//! possibly overlapping) into an in-order byte stream.
-class StreamReassembler {
-  private:
-    // Your code here -- add private members as necessary.
+// You will need to add private members to the class declaration in `stream_reassembler.hh`
 
-    ByteStream _output;  //!< The reassembled in-order byte stream
-    size_t _capacity;    //!< The maximum number of bytes
+template <typename... Targs>
+void DUMMY_CODE(Targs &&... /* unused */) {}
 
-  public:
-    //! \brief Construct a `StreamReassembler` that will store up to `capacity` bytes.
-    //! \note This capacity limits both the bytes that have been reassembled,
-    //! and those that have not yet been reassembled.
-    StreamReassembler(const size_t capacity);
+using namespace std;
 
-    //! \brief Receive a substring and write any newly contiguous bytes into the stream.
-    //!
-    //! The StreamReassembler will stay within the memory limits of the `capacity`.
-    //! Bytes that would exceed the capacity are silently discarded.
-    //!
-    //! \param data the substring
-    //! \param index indicates the index (place in sequence) of the first byte in `data`
-    //! \param eof the last byte of `data` will be the last byte in the entire stream
-    void push_substring(const std::string &data, const uint64_t index, const bool eof);
+StreamReassembler::StreamReassembler(const size_t capacity) : _output(capacity), _capacity(capacity) {
+    _buffer.resize(capacity);
+}
 
-    //! \name Access the reassembled byte stream
-    //!@{
-    const ByteStream &stream_out() const { return _output; }
-    ByteStream &stream_out() { return _output; }
-    //!@}
+long StreamReassembler::merge_block(block_node &elm1, const block_node &elm2) {
+    block_node x, y;
+    if (elm1.begin > elm2.begin) {
+        x = elm2;
+        y = elm1;
+    } else {
+        x = elm1;
+        y = elm2;
+    }
+    if (x.begin + x.length < y.begin) {
+        // throw runtime_error("StreamReassembler: couldn't merge blocks\n");
+        return -1;  // no intersection, couldn't merge
+    } else if (x.begin + x.length >= y.begin + y.length) {
+        elm1 = x;
+        return y.length;
+    } else {
+        elm1.begin = x.begin;
+        elm1.data = x.data + y.data.substr(x.begin + x.length - y.begin);
+        elm1.length = elm1.data.length();
+        return x.begin + x.length - y.begin;
+    }
+}
 
-    //! The number of bytes in the substrings stored but not yet reassembled
-    //!
-    //! \note If the byte at a particular index has been pushed more than once, it
-    //! should only be counted once for the purpose of this function.
-    size_t unassembled_bytes() const;
+//! \details This function accepts a substring (aka a segment) of bytes,
+//! possibly out-of-order, from the logical stream, and assembles any newly
+//! contiguous substrings and writes them into the output stream in order.
+void StreamReassembler::push_substring(const string &data, const size_t index, const bool eof) {
+    if (index >= _head_index + _capacity) {  // capacity over
+        return;
+    }
 
-    //! \brief Is the internal state empty (other than the output stream)?
-    //! \returns `true` if no substrings are waiting to be assembled
-    bool empty() const;
-};
+    // handle extra substring prefix
+    block_node elm;
+    if (index + data.length() <= _head_index) {  // couldn't equal, because there have emtpy substring
+        goto JUDGE_EOF;
+    } else if (index < _head_index) {
+        size_t offset = _head_index - index;
+        elm.data.assign(data.begin() + offset, data.end());
+        elm.begin = index + offset;
+        elm.length = elm.data.length();
+    } else {
+        elm.begin = index;
+        elm.length = data.length();
+        elm.data = data;
+    }
+    _unassembled_byte += elm.length;
 
-#endif  // SPONGE_LIBSPONGE_STREAM_REASSEMBLER_HH
+    // merge substring
+    do {
+        // merge next
+        long merged_bytes = 0;
+        auto iter = _blocks.lower_bound(elm);
+        while (iter != _blocks.end() && (merged_bytes = merge_block(elm, *iter)) >= 0) {
+            _unassembled_byte -= merged_bytes;
+            _blocks.erase(iter);
+            iter = _blocks.lower_bound(elm);
+        }
+        // merge prev
+        if (iter == _blocks.begin()) {
+            break;
+        }
+        iter--;
+        while ((merged_bytes = merge_block(elm, *iter)) >= 0) {
+            _unassembled_byte -= merged_bytes;
+            _blocks.erase(iter);
+            iter = _blocks.lower_bound(elm);
+            if (iter == _blocks.begin()) {
+                break;
+            }
+            iter--;
+        }
+    } while (false);
+    _blocks.insert(elm);
+
+    // write to ByteStream
+    if (!_blocks.empty() && _blocks.begin()->begin == _head_index) {
+        const block_node head_block = *_blocks.begin();
+        // modify _head_index and _unassembled_byte according to successful write to _output
+        size_t write_bytes = _output.write(head_block.data);
+        _head_index += write_bytes;
+        _unassembled_byte -= write_bytes;
+        _blocks.erase(_blocks.begin());
+    }
+
+JUDGE_EOF:
+    if (eof) {
+        _eof_flag = true;
+    }
+    if (_eof_flag && empty()) {
+        _output.end_input();
+    }
+}
+
+size_t StreamReassembler::unassembled_bytes() const { return _unassembled_byte; }
+
+bool StreamReassembler::empty() const { return _unassembled_byte == 0; }
